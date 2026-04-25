@@ -616,6 +616,7 @@ def main():
     app.add_handler(CommandHandler("positions", cmd_positions))
     app.add_handler(CommandHandler("trades",    cmd_trades))
     app.add_handler(CommandHandler("weekly",    cmd_weekly))
+    app.add_handler(CommandHandler("deep",      cmd_deep))
 
     log.info("✅ Ready!")
     app.run_polling(drop_pending_updates=True)
@@ -664,3 +665,115 @@ def analyze(h1_candles, m15_candles, m5_candles, price):
         "best_entry":  best_entry,
         "summary":     summary,
     }
+
+# ── /deep command ─────────────────────────────────────────────────────────────
+async def cmd_deep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = context.args
+    sym = args[0].upper() if args else "XAUUSD"
+    if sym != "XAUUSD":
+        await update.message.reply_text("❌ Scalping bot รองรับแค่ XAUUSD ครับ")
+        return
+    await update.message.reply_text(f"🔍 Deep analysis {sym}... รอ 40 วินาทีครับ")
+    import concurrent.futures
+    try:
+        def deep_scan():
+            h1_candles  = fetch_candles("1h",  100)
+            m15_candles = fetch_candles("15m", 100)
+            m5_candles  = fetch_candles("5m",   50)
+            price       = fetch_price()
+            if not price.get("bid"):
+                return None, None
+            bid = price.get("bid", 0)
+            # SMC analysis
+            from strategy import run_strategy, calc_h1_bias, calc_m15_zone
+            result  = run_strategy(h1_candles, m15_candles, m5_candles, bid)
+            h1      = result["h1_bias"]
+            m15     = result["m15_zone"]
+            m5      = result["m5_signal"]
+            atr     = calc_atr(m15_candles)
+            # Deep Claude analysis
+            prompt = f"""คุณเป็น SMC trader เชี่ยวชาญ XAUUSD วิเคราะห์เชิงลึก:
+
+ราคาปัจจุบัน: Bid={bid} Ask={price.get('ask')}
+ATR M15: {atr} pips
+
+=== H1 Structure ===
+Direction: {h1.direction} | Structure: {h1.structure}
+BOS: {h1.last_bos} | CHoCH: {h1.choch}
+Key Support: {h1.key_support} | Key Resistance: {h1.key_resistance}
+Confidence: {h1.confidence}
+
+=== M15 Zone ===
+In Zone: {m15.in_zone} | Type: {m15.zone_type}
+Zone: {m15.zone_low} - {m15.zone_high} | Strength: {m15.zone_strength}x
+M15 Bias: {m15.bias}
+
+=== M5 Signal ===
+Signal: {m5.signal} | Pattern: {m5.pattern}
+Entry: {m5.entry} | SL: {m5.sl} | TP: {m5.tp}
+SL pips: {m5.sl_pips} | RR: {m5.rr}
+
+วิเคราะห์ละเอียดและตอบ JSON:
+{{
+  "opportunity": "High/Medium/Low/Skip",
+  "bias": "Bullish/Bearish/Neutral",
+  "h1_analysis": "วิเคราะห์ H1 structure และ SMC",
+  "m15_zone": "วิเคราะห์ zone และความแข็งแกร่ง",
+  "m5_signal": "วิเคราะห์ entry signal",
+  "key_levels": "แนวรับแนวต้านสำคัญ",
+  "risk_note": "ความเสี่ยงที่ควรระวัง",
+  "best_entry": {{
+    "direction": "BUY/SELL/WAIT",
+    "entry": "{m5.entry or bid}",
+    "sl": "{m5.sl or '-'}",
+    "tp": "{m5.tp or '-'}",
+    "rr": "1:{m5.rr or MIN_RR}",
+    "confirmation": "รอสัญญาณอะไรเพิ่ม"
+  }},
+  "summary": "สรุป 2-3 ประโยค"
+}}"""
+            resp = claude.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            text = resp.content[0].text.strip().replace("```json","").replace("```","").strip()
+            start = text.find("{"); end = text.rfind("}")+1
+            if start >= 0 and end > start:
+                text = text[start:end]
+            analysis = json.loads(text)
+            return analysis, price
+
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(deep_scan)
+            analysis, price = future.result(timeout=90)
+
+        if not analysis:
+            await update.message.reply_text("⚠️ ไม่สามารถวิเคราะห์ได้ครับ ลองใหม่")
+            return
+
+        e = analysis.get("best_entry", {})
+        now = datetime.now(BKK).strftime("%d/%m %H:%M")
+        opp_emoji = {"High":"🔥","Medium":"⚡","Low":"💤","Skip":"⏭️"}.get(analysis.get("opportunity",""),"❓")
+        msg = (
+            f"{opp_emoji} <b>Deep Analysis — XAUUSD</b> — {now}\n"
+            f"💹 {price.get('bid')} / {price.get('ask')}\n"
+            f"📊 Bias: <b>{html.escape(str(analysis.get('bias','')))}</b> | โอกาส: <b>{analysis.get('opportunity','')}</b>\n\n"
+            f"📋 H1: <i>{html.escape(str(analysis.get('h1_analysis',''))[:250])}</i>\n"
+            f"📍 M15 Zone: {html.escape(str(analysis.get('m15_zone',''))[:200])}\n"
+            f"🕯 M5 Signal: {html.escape(str(analysis.get('m5_signal',''))[:200])}\n"
+            f"🎯 Key Levels: {html.escape(str(analysis.get('key_levels',''))[:200])}\n"
+            f"⚠️ Risk: {html.escape(str(analysis.get('risk_note',''))[:200])}\n\n"
+            f"{'📈' if e.get('direction')=='BUY' else '📉'} <b>{e.get('direction','WAIT')}</b>\n"
+            f"  Entry: {e.get('entry','-')} | SL: {e.get('sl','-')} | TP: {e.get('tp','-')}\n"
+            f"  R/R: {e.get('rr','-')}\n"
+            f"  ⏳ {e.get('confirmation','-')}\n\n"
+            f"💬 <i>{html.escape(str(analysis.get('summary',''))[:300])}</i>"
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+        if BOT_ENABLED and analysis.get("opportunity") in ["High","Medium"]:
+            execute(analysis, price)
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {e}")
