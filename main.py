@@ -11,6 +11,7 @@ from anthropic import Anthropic
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from strategy import run_strategy
 from database import save_trade, update_trade_result, get_all_trades, get_daily_pnl, get_weekly_stats, get_monthly_stats
 
 load_dotenv()
@@ -621,3 +622,45 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ── OVERRIDE analyze() with SMC strategy ─────────────────────────────────────
+def analyze(h1_candles, m15_candles, m5_candles, price):
+    bid = price.get("bid", 0)
+    if not bid:
+        return {"opportunity":"Skip","bias":"Neutral","h1_analysis":"No price",
+                "m15_zone":"N/A","m5_signal":"N/A",
+                "best_entry":{"direction":"WAIT","entry":"-","sl":"-","tp":"-","rr":"-","confirmation":"No price"},
+                "summary":"Cannot analyze without price"}
+    result = run_strategy(h1_candles, m15_candles, m5_candles, bid)
+    h1, m15, m5 = result["h1_bias"], result["m15_zone"], result["m5_signal"]
+    opp = result["opportunity"]
+    best_entry = {
+        "direction":    m5.signal if m5.signal != "WAIT" else result["direction"],
+        "entry":        str(m5.entry) if m5.entry else "-",
+        "sl":           str(m5.sl)    if m5.sl    else "-",
+        "tp":           str(m5.tp)    if m5.tp    else "-",
+        "rr":           f"1:{m5.rr}"  if m5.rr    else f"1:{MIN_RR}",
+        "confirmation": m5.reason,
+    }
+    summary = result["reason"]
+    if opp in ["High","Medium"] and m5.signal != "WAIT":
+        try:
+            resp = claude.messages.create(
+                model="claude-sonnet-4-20250514", max_tokens=200,
+                messages=[{"role":"user","content":
+                    f"สรุปสัญญาณ trading นี้ 1-2 ประโยคภาษาไทย:\n"
+                    f"H1: {h1.direction} ({h1.reason})\n"
+                    f"M15: {m15.zone_type} zone {m15.zone_low}-{m15.zone_high}\n"
+                    f"M5: {m5.pattern} | Entry {m5.entry} SL {m5.sl} TP {m5.tp}"}]
+            )
+            summary = resp.content[0].text.strip()
+        except: pass
+    return {
+        "opportunity": opp,
+        "bias":        h1.direction,
+        "h1_analysis": f"{h1.structure} | {h1.reason}",
+        "m15_zone":    f"{m15.zone_type} {m15.zone_low}-{m15.zone_high} (x{m15.zone_strength})" if m15.in_zone else m15.reason,
+        "m5_signal":   f"{m5.pattern} | {m5.reason}",
+        "best_entry":  best_entry,
+        "summary":     summary,
+    }
