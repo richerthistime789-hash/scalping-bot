@@ -677,7 +677,7 @@ async def cmd_deep(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import concurrent.futures
     try:
         def deep_scan():
-            h1_candles  = fetch_candles("1h",  100)
+            h1_candles  = fetch_candles("1h",  110)
             m15_candles = fetch_candles("15m", 100)
             m5_candles  = fetch_candles("5m",   50)
             price       = fetch_price()
